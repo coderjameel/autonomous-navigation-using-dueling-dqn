@@ -145,9 +145,8 @@ def update_graph(loss_history, epoch):
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    
     # Overwrite the main file so you always have the latest
-    plt.savefig(os.path.join(LOG_DIR, 'latest_training_graph.png'))
+    plt.savefig(os.path.join(LOG_DIR, f'latest_training_graph_epoch_{epoch}.png'))
     
     # Save a specific history file if you want to keep them all
     # plt.savefig(os.path.join(LOG_DIR, f'loss_graph_epoch_{epoch}.png'))
