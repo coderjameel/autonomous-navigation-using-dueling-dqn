@@ -12,7 +12,7 @@ except ImportError:
     pass
 
 # --- CONFIG ---
-MODEL_PATH = './save_pro/best_model.pth'
+MODEL_PATH = './results/best_model.pth'
 DATA_DIR = './data'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

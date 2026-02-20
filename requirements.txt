@@ -1,0 +1,11 @@
+ultralytics
+transformers
+datasets
+accelerate
+peft
+bitsandbytes
+opencv-python-headless
+numpy
+matplotlib
+pillow
+rich
