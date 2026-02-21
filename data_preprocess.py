@@ -3,26 +3,29 @@ import cv2
 import torch
 import numpy as np
 from PIL import Image
-from ultralytics import YOLO
-from transformers import pipeline
 from tqdm import tqdm
+from ultralytics import YOLO
+from transformers import DPTImageProcessor, DPTForDepthEstimation
 
+# ---------------- CONFIG ----------------
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 32  # Increase to 64 if GPU memory allows
-
+BATCH_SIZE = 64  # H200 can handle this easily
 DATA_DIR = "./data"
 SAVE_DIR = "./data_precomputed"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-print("Loading models...")
-seg_model = YOLO("yolov8n-seg.pt")
-depth_estimator = pipeline(
-    task="depth-estimation",
-    model="Intel/dpt-hybrid-midas",
-    device=0 if DEVICE == "cuda" else -1
-)
+print(f"Using device: {DEVICE}")
 
-# Load metadata
+# ---------------- LOAD MODELS ----------------
+print("Loading YOLO...")
+seg_model = YOLO("yolov8n-seg.pt")
+
+print("Loading Depth Model (Direct, no pipeline)...")
+processor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
+depth_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(DEVICE)
+depth_model.eval()
+
+# ---------------- LOAD DATA ----------------
 samples = []
 with open(os.path.join(DATA_DIR, "data.txt"), "r") as f:
     for line in f:
@@ -31,31 +34,50 @@ with open(os.path.join(DATA_DIR, "data.txt"), "r") as f:
         angle = float(parts[1].split(",")[0])
         samples.append((img_name, angle))
 
+print(f"Total images: {len(samples)}")
+
+# ---------------- PROCESS BATCH ----------------
 def process_batch(batch):
     images = []
-    valid_entries = []
+    angles = []
+    names = []
 
     for img_name, angle in batch:
         img_path = os.path.join(DATA_DIR, img_name)
-        image = cv2.imread(img_path)
-        if image is None:
+        img = cv2.imread(img_path)
+        if img is None:
             continue
-        image = cv2.resize(image, (200, 66))
-        images.append(image)
-        valid_entries.append((img_name, angle))
+        img = cv2.resize(img, (200, 66))
+        images.append(img)
+        angles.append(angle)
+        names.append(img_name)
 
     if len(images) == 0:
         return
 
-    # --- YOLO Batch ---
+    # ---------- YOLO BATCH ----------
     yolo_results = seg_model(images, verbose=False)
 
-    # --- Depth Batch ---
+    # ---------- DEPTH BATCH (TRUE GPU BATCH) ----------
     pil_batch = [Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)) for img in images]
-    depth_outputs = depth_estimator(pil_batch)
+    inputs = processor(images=pil_batch, return_tensors="pt").to(DEVICE)
 
-    for i, (img_name, angle) in enumerate(valid_entries):
-        image = images[i]
+    with torch.no_grad():
+        outputs = depth_model(**inputs)
+        predicted_depth = outputs.predicted_depth
+
+    predicted_depth = torch.nn.functional.interpolate(
+        predicted_depth.unsqueeze(1),
+        size=(66, 200),
+        mode="bicubic",
+        align_corners=False,
+    ).squeeze(1)
+
+    depth_maps = predicted_depth.cpu().numpy()
+
+    # ---------- SAVE ----------
+    for i in range(len(images)):
+        img = images[i]
 
         # Segmentation
         if yolo_results[i].masks is not None:
@@ -65,20 +87,19 @@ def process_batch(batch):
         else:
             seg_mask = np.zeros((66, 200), dtype=np.float32)
 
-        # Depth
-        depth_map = np.array(depth_outputs[i]["depth"])
+        depth_map = depth_maps[i]
         depth_map = cv2.normalize(depth_map, None, 0, 1, cv2.NORM_MINMAX)
-        depth_map = cv2.resize(depth_map, (200, 66))
 
-        rgb = image.astype(np.float32) / 255.0
+        rgb = img.astype(np.float32) / 255.0
         combined = np.dstack((rgb, seg_mask, depth_map))
 
         torch.save({
             "tensor": torch.from_numpy(combined).permute(2, 0, 1).float(),
-            "angle": angle
-        }, os.path.join(SAVE_DIR, img_name.replace(".jpg", ".pt")))
+            "angle": angles[i]
+        }, os.path.join(SAVE_DIR, names[i].replace(".jpg", ".pt")))
 
-print("Starting batched preprocessing...")
+# ---------------- MAIN LOOP ----------------
+print("Starting FAST batched preprocessing...")
 
 for i in tqdm(range(0, len(samples), BATCH_SIZE)):
     process_batch(samples[i:i+BATCH_SIZE])
